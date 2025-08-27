@@ -1,12 +1,13 @@
 #!/bin/zsh
-# Ultimate OSINT Setup for Kali + Pro CLI Menu
+# Ultimate OSINT Setup for Kali + Pro CLI Menu (+ Updater)
 # - ALWAYS refresh Kali archive keyring before apt ops
 # - APT self-heal + full-upgrade + base deps
 # - Python/pipx, Go (GOPATH/GOBIN), Rust/cargo
 # - Installs: Shodan, Sherlock, PhoneInfoga, SpiderFoot, sn0int, Metagoofil,
-#             Sublist3r, StegOSuite (APT first; source fallback), ExifTool, Tor/Tor Browser, Gowitness
-# - Installs Go tools directly into /usr/local/bin (no /root symlink issues)
-# - Pro CLI menu: osint-menu (whiptail → fzf → PS3 fallback)
+#             Sublist3r, StegOSuite (APT first; source fallback), ExifTool, Tor/Tor Browser
+# - Installs a polished CLI menu: osint-menu (whiptail → fzf → PS3 fallback)
+# - Downloads Trace Labs Contestant Guide to Desktop
+# - Adds a self-healing updater: /usr/local/bin/osint-updater + Desktop icon
 # - Idempotent & logged to ~/osint-bootstrap.log
 
 set -uo pipefail
@@ -15,10 +16,20 @@ export DEBIAN_FRONTEND=noninteractive
 LOG_FILE="${HOME}/osint-bootstrap.log"
 touch "$LOG_FILE" || { echo "Cannot write ${LOG_FILE}"; exit 1; }
 
+# Resolve target user (for Desktop files) even when running with sudo
+if [[ $EUID -eq 0 && -n "${SUDO_USER-}" && "${SUDO_USER}" != "root" ]]; then
+  TARGET_USER="${SUDO_USER}"
+  TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
+else
+  TARGET_USER="$(id -un)"
+  TARGET_HOME="${HOME}"
+fi
+[[ -z "${TARGET_HOME}" ]] && TARGET_HOME="${HOME}"
+
 if [[ $EUID -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
 
 log()   { print -r -- "$(date +'%F %T') [INFO] $*" | tee -a "$LOG_FILE" >&2; }
-logerr(){ print -r -- "$(date +'%F %T') [ERR ] $*"  | tee -a "$LOG_FILE" >&2; }
+logerr(){ print -r -- "$(date +'%F %T') [ERR ]  $*" | tee -a "$LOG_FILE" >&2; }
 run()   { print -r -- "$(date +'%F %T') [EXEC] $*" | tee -a "$LOG_FILE" >&2; eval "$@" 2>>"$LOG_FILE"; }
 
 # --- ALWAYS fetch the Kali archive keyring before apt update ---
@@ -144,21 +155,6 @@ go_install_if_missing() {
 }
 cargo_install_if_missing() { local crate="$1"; if ! command -v "$crate" >/dev/null 2>&1; then run "cargo install --locked \"$crate\""; fi; }
 
-# Install a Go tool directly to /usr/local/bin (avoids /root path)
-go_install_global() {
-  local module="$1"   # e.g. github.com/sensepost/gowitness@latest
-  local bin="$2"      # e.g. gowitness
-  local dest="/usr/local/bin/${bin}"
-  run "env GOBIN=/usr/local/bin go install \"$module\""
-  if [[ -f "$dest" ]]; then
-    ${SUDO} chmod 0755 "$dest" || true
-    ${SUDO} chown root:root "$dest" || true
-    log "[*] Installed $bin to $dest (chmod 0755). If not visible: run 'rehash' in zsh."
-  else
-    logerr "[go_install_global] Failed to install $bin to $dest"
-  fi
-}
-
 # --- Fallback: build StegOSuite from source (only if APT not available) ---
 build_stegosuite_from_source() {
   local repo="https://github.com/osde8info/stegosuite.git"
@@ -211,8 +207,12 @@ install_tools_from_list() {
   # Sherlock (git for freshness)
   pipx_install_or_upgrade "git+https://github.com/sherlock-project/sherlock.git" "sherlock"
 
-  # PhoneInfoga (Go) — install globally
-  go_install_global "github.com/sundowndev/phoneinfoga/v2/cmd/phoneinfoga@latest" "phoneinfoga"
+  # PhoneInfoga (Go) — install globally to /usr/local/bin
+  # (build via user's Go then copy/perm-fix)
+  if command -v go >/dev/null 2>&1; then
+    run "env GOBIN=/usr/local/bin go install \"github.com/sundowndev/phoneinfoga/v2/cmd/phoneinfoga@latest\""
+    ${SUDO} chmod 0755 /usr/local/bin/phoneinfoga 2>>"$LOG_FILE" || true
+  fi
 
   # SpiderFoot (prefer APT; fallback pipx/git)
   if ! apt_try_install spiderfoot; then
@@ -241,9 +241,28 @@ install_tools_from_list() {
   # ExifTool (APT name may vary)
   apt_try_install exiftool || apt_try_install libimage-exiftool-perl || true
 
-  # Tor / Tor Browser (APT already in base)
+  # Tor / Tor Browser already in base
   true
+}
 
+# --- Download Trace Labs Contestant Guide to Desktop ---
+fetch_tracelabs_pdf() {
+  local url="https://download2.tracelabs.org/Trace-Labs-OSINT-Search-Party-CTF-Contestant-Guide_v1.pdf"
+  local dest_dir="${TARGET_HOME}/Desktop"
+  local dest="${dest_dir}/Trace-Labs-OSINT-Search-Party-CTF-Contestant-Guide_v1.pdf"
+  log "[*] Downloading Trace Labs Contestant Guide to ${dest}"
+  ${SUDO} mkdir -p "${dest_dir}" 2>>"$LOG_FILE" || true
+  if command -v curl >/dev/null 2>&1; then
+    ${SUDO} curl -fsSL "$url" -o "$dest" || logerr "curl failed to fetch Trace Labs PDF"
+  elif command -v wget >/dev/null 2>&1; then
+    ${SUDO} wget -q "$url" -O "$dest" || logerr "wget failed to fetch Trace Labs PDF"
+  else
+    logerr "Neither curl nor wget available to fetch Trace Labs PDF"
+  fi
+  ${SUDO} chmod 0644 "$dest" 2>>"$LOG_FILE" || true
+  if [[ $EUID -eq 0 ]]; then
+    ${SUDO} chown "${TARGET_USER}:${TARGET_USER}" "$dest" 2>>"$LOG_FILE" || true
+  fi
 }
 
 # --- CLI Menu installer ---
@@ -261,7 +280,7 @@ mk_ws(){ local t="${1:-misc}"; local r="${HOME}/osint-workspaces/${t}"; local w=
 
 ensure_tools(){
   local miss=()
-  for b in shodan sherlock phoneinfoga sn0int metagoofil sublist3r exiftool gowitness; do has "$b" || miss+=("$b"); done
+  for b in shodan sherlock phoneinfoga sn0int metagoofil sublist3r exiftool; do has "$b" || miss+=("$b"); done
   has spiderfoot || has sf.py || miss+=("spiderfoot/sf.py")
   if ((${#miss[@]})); then echo "Missing: ${miss[*]}"; echo "Re-run setup or install missing tools."; exit 1; fi
 }
@@ -286,18 +305,11 @@ action_metagoofil(){ read -rp "Domain: " d; read -rp "Doc types (default: pdf,do
 action_sublist3r(){ read -rp "Domain: " d; ws="$(mk_ws "subdomains_${d}")"; sublist3r -d "$d" -o "${ws}/subdomains.txt" | tee "${ws}/sublist3r.log"; log "Saved: ${ws}/subdomains.txt"; }
 action_stegosuite(){
   if has stegosuite; then setsid sh -c 'stegosuite >/dev/null 2>&1 &' </dev/null
-  elif [[ -f /opt/stegosuite/stegosuite.jar ]]; then setsid sh -c 'java -jar /opt/stegosuite/stegosuite.jar >/dev/null 2>&1 &' </devnull
+  elif [[ -f /opt/stegosuite/stegosuite.jar ]]; then setsid sh -c 'java -jar /opt/stegosuite/stegosuite.jar >/dev/null 2>&1 &' </dev/null
   else echo "StegOSuite not found. Install with APT or ensure /opt/stegosuite/stegosuite.jar exists."; fi
 }
 action_exiftool(){ read -rp "Path (file or dir): " p; ws="$(mk_ws exif)"; if [[ -d "$p" ]]; then exiftool -r "$p" | tee "${ws}/exif_recursive.txt"; else exiftool "$p" | tee "${ws}/exif_$(ts).txt"; fi; }
 action_torbrowser(){ if has torbrowser-launcher; then torbrowser-launcher; else echo "torbrowser-launcher not installed."; fi; }
-pipeline_subs_to_gowitness(){
-  read -rp "Domain: " d; ws="$(mk_ws "screens_${d}")"
-  echo "[*] Subdomain enum…"; sublist3r -d "$d" -o "${ws}/subdomains.txt" >/dev/null
-  echo "[*] Building URLs…"; awk '{print "http://" $0 "\nhttps://" $0}' "${ws}/subdomains.txt" | sort -u > "${ws}/urls.txt"
-  echo "[*] Gowitness screenshots…"; gowitness file -f "${ws}/urls.txt" --db "${ws}/gowitness.sqlite" --log-level info | tee "${ws}/gowitness.log"
-  log "Outputs in $ws (captures/, urls.txt, gowitness.sqlite)"; echo "Tip: cd \"$ws\" && gowitness report serve"
-}
 
 menu_pick(){
   local title="$1"; shift; local options=("$@")
@@ -324,7 +336,6 @@ main_menu(){
       "StegOSuite (GUI)" \
       "ExifTool (metadata)" \
       "Tor Browser" \
-      "Pipeline: Subdomain enum → Gowitness screenshots" \
       "Exit")"
     case "${c:-Exit}" in
       "Shodan CLI") action_shodan ;;
@@ -337,7 +348,6 @@ main_menu(){
       "StegOSuite (GUI)") action_stegosuite ;;
       "ExifTool (metadata)") action_exiftool ;;
       "Tor Browser") action_torbrowser ;;
-      "Pipeline: Subdomain enum → Gowitness screenshots") pipeline_subs_to_gowitness ;;
       *) echo "Bye!"; exit 0 ;;
     esac
   done
@@ -367,10 +377,99 @@ EOF
   log "[*] Desktop launcher created: $D"
 }
 
+# --- Self-healing updater + Desktop launcher ---
+install_osint_updater() {
+  log "[*] Installing OSINT updater"
+
+  # 1) /usr/local/bin/osint-updater (runs as root via pkexec)
+  local UPD="/usr/local/bin/osint-updater"
+  ${SUDO} tee "$UPD" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_FILE="/var/log/osint-updater.log"
+touch "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/osint-updater.log"
+log()   { printf '%s [INFO] %s\n' "$(date +'%F %T')" "$*" | tee -a "$LOG_FILE" >&2; }
+logerr(){ printf '%s [ERR ] %s\n'  "$(date +'%F %T')" "$*" | tee -a "$LOG_FILE" >&2; }
+run()   { printf '%s [EXEC] %s\n'  "$(date +'%F %T')" "$*" | tee -a "$LOG_FILE" >&2; eval "$@" 2>>"$LOG_FILE"; }
+export DEBIAN_FRONTEND=noninteractive
+ensure_kali_keyring() {
+  local KR="/usr/share/keyrings/kali-archive-keyring.gpg"
+  mkdir -p /usr/share/keyrings 2>>"$LOG_FILE" || true
+  log "[*] Forcing Kali archive keyring refresh…"
+  if command -v wget >/dev/null 2>&1; then
+    wget -q "https://archive.kali.org/archive-keyring.gpg" -O "$KR" || logerr "Kali keyring download failed (wget)"
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL "https://archive.kali.org/archive-keyring.gpg" -o "$KR" || logerr "Kali keyring download failed (curl)"
+  else
+    logerr "Neither wget nor curl available to fetch Kali keyring"
+  fi
+  chmod 0644 "$KR" 2>>"$LOG_FILE" || true
+  chown root:root "$KR" 2>>"$LOG_FILE" || true
+  mkdir -p /etc/apt/trusted.gpg.d 2>>"$LOG_FILE" || true
+  cp -f "$KR" /etc/apt/trusted.gpg.d/kali-archive-keyring.gpg 2>>"$LOG_FILE" || true
+}
+apt_self_heal_update() {
+  ensure_kali_keyring
+  run "apt-get update -y"
+  run "apt-get -y --allow-downgrades --allow-remove-essential --allow-change-held-packages dist-upgrade"
+  run "apt-get -f install -y || true"
+  run "dpkg --configure -a || true"
+  run "apt-get -y autoremove --purge || true"
+  run "apt-get -y clean || true"
+}
+upgrade_pipx_tools() {
+  if command -v pipx >/dev/null 2>&1; then
+    log "[*] Upgrading pipx apps"
+    run "pipx upgrade-all || true"
+  fi
+}
+upgrade_go_tools() {
+  if command -v go >/dev/null 2>&1; then
+    log "[*] Refreshing PhoneInfoga (Go)"
+    run "env GOBIN=/usr/local/bin go install github.com/sundowndev/phoneinfoga/v2/cmd/phoneinfoga@latest"
+    chmod 0755 /usr/local/bin/phoneinfoga 2>>"$LOG_FILE" || true
+  fi
+}
+upgrade_rust_tools() {
+  if command -v cargo >/dev/null 2>&1; then
+    log "[*] Refreshing sn0int (Rust)"
+    run "cargo install --locked sn0int"
+  fi
+}
+main(){ log "==== OSINT Updater starting ===="; apt_self_heal_update; upgrade_pipx_tools; upgrade_go_tools; upgrade_rust_tools; log "==== OSINT Updater complete. See $LOG_FILE for details. ===="; }
+main "$@"
+EOF
+  ${SUDO} chmod +x "$UPD"
+  ${SUDO} chown root:root "$UPD"
+
+  # 2) Desktop launcher (for the real user even when run via sudo)
+  local DESK="${TARGET_HOME}/Desktop/OSINT-Updater.desktop"
+  ${SUDO} mkdir -p "${TARGET_HOME}/Desktop"
+  ${SUDO} tee "$DESK" >/dev/null <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=OSINT Updater
+Comment=Update Kali & OSINT tools (Trace Labs "grandma mode")
+Exec=pkexec /usr/local/bin/osint-updater
+Icon=system-software-update
+Terminal=true
+Categories=System;Utility;Security;
+StartupNotify=true
+EOF
+  ${SUDO} chmod +x "$DESK"
+  if [[ $EUID -eq 0 ]]; then
+    ${SUDO} chown "${TARGET_USER}:${TARGET_USER}" "$DESK"
+  fi
+
+  log "[*] OSINT Updater installed: $UPD"
+  log "[*] Desktop launcher created: $DESK"
+  log "[*] Tip: if the button doesn’t run, ensure polkit (pkexec) is installed."
+}
+
 post_install_checks() {
   log "[*] Post-install sanity checks"
   local missing=()
-  for b in shodan sherlock phoneinfoga sn0int metagoofil sublist3r exiftool gowitness tor; do
+  for b in shodan sherlock phoneinfoga sn0int metagoofil sublist3r exiftool tor; do
     command -v "$b" >/dev/null 2>&1 || missing+=("$b")
   done
   command -v spiderfoot >/dev/null 2>&1 || command -v sf.py >/dev/null 2>&1 || missing+=("spiderfoot/sf.py")
@@ -391,12 +490,21 @@ Usage:
 - Launch toolbox:  osint-menu
 - Shodan:          shodan init <API_KEY>  (first time)
 - StegOSuite:      stegosuite   (APT)   or   java -jar /opt/stegosuite/stegosuite.jar
-- Pipeline demo:   Sublist3r → URLs → Gowitness screenshots (gallery: gowitness report serve)
+- SpiderFoot UI:   choose "SpiderFoot (web UI)" then open http://127.0.0.1:5001
+- Updater (GUI):   Double-click "OSINT Updater" on Desktop (runs via pkexec)
+- Updater (CLI):   pkexec /usr/local/bin/osint-updater
 - PATH refresh:    source ~/.profile   (or open a new terminal)
+
 Workspaces:
 - Outputs saved in  ~/osint-workspaces/<target>/<timestamp>/
+
+Docs:
+- Trace Labs Contestant Guide placed on Desktop:
+  Trace-Labs-OSINT-Search-Party-CTF-Contestant-Guide_v1.pdf
+
 Logs:
 - Setup log:       ~/osint-bootstrap.log
+- Updater log:     /var/log/osint-updater.log (or /tmp on fallback)
 ----------------------------------------------------------------
 EOF
 }
@@ -409,8 +517,10 @@ main() {
   setup_go_env
   setup_rust_env
   install_tools_from_list
+  fetch_tracelabs_pdf
   install_cli_menu
   install_menu_launcher
+  install_osint_updater
   post_install_checks
   usage_hints
   log "==== Completed. See ${LOG_FILE} for details. ===="
