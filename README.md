@@ -32,6 +32,6 @@ This script automates installation, configuration, and adds a clean **CLI menu**
 
 ```bash
 cd ~/Desktop
-wget https://raw.githubusercontent.com/404Yeti/ultimate-osint-tools/main/tlosint-tools.sh
+wget https://raw.githubusercontent.com/404Yeti/ultimate-osint-tools/main/osint-tool.sh
 chmod +x osint-tools.sh
 sudo ./osint-tools.sh
