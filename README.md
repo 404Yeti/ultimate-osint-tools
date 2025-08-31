@@ -35,4 +35,4 @@ It automates installation, config, and sanity checks — plus a **desktop “OSI
 cd ~/Desktop
 wget https://raw.githubusercontent.com/404Yeti/ultimate-osint-tools/main/osint-tool.sh
 chmod +x osint-tool.sh
-sudo ./osint-tool.sh
+./osint-tool.sh
