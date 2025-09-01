@@ -31,5 +31,5 @@ Runs as a **regular user** (no `sudo` needed), is **idempotent**, and includes a
 cd ~/Desktop
 # Download (save as osint-tools.sh), make executable, and run as a regular user:
 wget -O osint-tools.sh "https://github.com/404Yeti/ultimate-osint-tools/blob/main/osint-tool.sh?raw=1"
-chmod +x osint-tools.sh
-./osint-tools.sh
+chmod +x osint-tool.sh
+./osint-tool.sh
