@@ -1,38 +1,45 @@
 # 🕵️ Ultimate OSINT Tools Installer
 
-A one-shot bootstrap script for setting up an **OSINT-ready environment** on **Kali Linux** (primary) and **Ubuntu** (partial support).
-It automates installation, config, and sanity checks — plus a **desktop “OSINT Updater” launcher** and a built-in **validator**.
+A one-file bootstrap script that turns a fresh **Kali Linux** box into an **OSINT-ready workstation**.  
+Runs as a regular user or with `sudo`, is idempotent, and ships with a built-in **validator** and **updater**.
 
 ---
 
-## 🚀 What you get
+## ✨ What You Get
 
-- 🔑 **Apt self-heal + Kali archive keyring refresh** (prevents broken package installs)
-- 🧰 Installs core OSINT tooling (APT first, with safe fallbacks):
-  - **Shodan CLI** (via pipx, with `pkg_resources` fix)
-  - **Sherlock** (pipx from git)
-  - **PhoneInfoga** (Go → upstream fallback)
-  - **SpiderFoot** (APT → pipx fallback)
-  - **sn0int** (adds `apt.vulns.sexy` repo + key; cargo fallback)
-  - **Metagoofil** (APT → pipx fallback)
-  - **Sublist3r** (APT → pipx fallback)
-  - **StegOSuite** (APT → source build fallback)
+- ✅ **APT self-heal + Kali keyring refresh** to avoid flaky installs  
+- 🧰 Installs and wires up core tools:
+  - **Shodan CLI** (via `pipx`, patched so `pkg_resources` errors don’t happen)
+  - **Sherlock**
+  - **PhoneInfoga** (Go build with upstream fallback)
+  - **SpiderFoot** (APT or `pipx` fallback)
+  - **sn0int** (via `apt.vulns.sexy` repo or Rust fallback)
+  - **Metagoofil**
+  - **Sublist3r**
+  - **StegOSuite** (APT or source build)
   - **ExifTool**, **Tor**, **Tor Browser Launcher**
-- 🌐 **DeepL Translator CLI** via Yarn **with a system-wide wrapper** (`/usr/local/bin/deepl`)
-- 🐍 Python/pipx, 🦀 Rust (rustup/cargo), 🐹 Go (GOPATH/GOBIN), Node.js/npm/Yarn
-- 🖱️ **Desktop launcher:** “**OSINT Updater**” (runs `apt` updates + refreshes pipx/go/cargo tools via `pkexec`)
-- 📄 **Trace Labs Contestant Guide PDF** downloaded to the Desktop
-- 🧪 **Built-in validator**: checks PATH, versions, repo keys, and tool health
-- 🔁 Idempotent: safe to re-run; logs to `~/osint-bootstrap.log`
-
-> ⚠️ Note: The script **adds the third-party repository** `apt.vulns.sexy` specifically for `sn0int`. You can remove it later (see Cleanup).
+  - **Translate Shell** (`trans`) — replaces DeepL CLI (no API key needed)
+- 🔗 **System-wide wrappers/symlinks** so tools are on `PATH` for all users:
+  - pipx apps (`shodan`, `sherlock`, etc.)
+  - Cargo tools (`cargo`, `rustc`, `rustup`, `sn0int`)
+- 🧭 Desktop niceties:
+  - **OSINT Updater** launcher (runs via `pkexec`)
+  - **Trace Labs CTF Contestant Guide** PDF to Desktop
+- 🔍 **Validator** to sanity-check versions, PATH, and repo keys
 
 ---
 
-## ⚡ Quick start (Kali recommended)
+## 🚀 Quick Start (Kali)
 
 ```bash
 cd ~/Desktop
-wget https://raw.githubusercontent.com/404Yeti/ultimate-osint-tools/main/osint-tool.sh
-chmod +x osint-tool.sh
-./osint-tool.sh
+# choose one:
+wget https://raw.githubusercontent.com/<your-username>/<your-repo>/main/osint-tools.sh
+# or
+curl -O https://raw.githubusercontent.com/<your-username>/<your-repo>/main/osint-tools.sh
+
+chmod +x osint-tools.sh
+# Run as your normal user (recommended). The script will sudo when needed:
+./osint-tools.sh
+# or explicitly:
+sudo ./osint-tools.sh
