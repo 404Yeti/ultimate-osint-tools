@@ -1,31 +1,27 @@
 # 🕵️ Ultimate OSINT Tools Installer
 
-A one-file bootstrap script that turns a fresh **Kali Linux** box into an **OSINT-ready workstation**.  
-Runs as a regular user or with `sudo`, is idempotent, and ships with a built-in **validator** and **updater**.
+Turn a fresh **Kali Linux** box into an **OSINT-ready workstation** with one script.  
+Runs as a **regular user** (no `sudo` needed), is **idempotent**, and includes a built-in **validator** and **updater**.
 
 ---
 
-## ✨ What You Get
+## ✨ Features (at a glance)
 
-- ✅ **APT self-heal + Kali keyring refresh** to avoid flaky installs  
-- 🧰 Installs and wires up core tools:
-  - **Shodan CLI** (via `pipx`, patched so `pkg_resources` errors don’t happen)
+- **APT self-heal + Kali keyring refresh** to avoid flaky installs
+- Installs core tools:
+  - **Shodan CLI** (patched so it “just works”)
   - **Sherlock**
   - **PhoneInfoga** (Go build with upstream fallback)
-  - **SpiderFoot** (APT or `pipx` fallback)
-  - **sn0int** (via `apt.vulns.sexy` repo or Rust fallback)
-  - **Metagoofil**
-  - **Sublist3r**
-  - **StegOSuite** (APT or source build)
+  - **SpiderFoot** (APT or pipx)
+  - **sn0int** (apt.vulns.sexy or Rust fallback)
+  - **Metagoofil**, **Sublist3r**
+  - **StegOSuite** (APT or source)
   - **ExifTool**, **Tor**, **Tor Browser Launcher**
-  - **Translate Shell** (`trans`) — replaces DeepL CLI (no API key needed)
-- 🔗 **System-wide wrappers/symlinks** so tools are on `PATH` for all users:
-  - pipx apps (`shodan`, `sherlock`, etc.)
-  - Cargo tools (`cargo`, `rustc`, `rustup`, `sn0int`)
-- 🧭 Desktop niceties:
-  - **OSINT Updater** launcher (runs via `pkexec`)
-  - **Trace Labs CTF Contestant Guide** PDF to Desktop
-- 🔍 **Validator** to sanity-check versions, PATH, and repo keys
+  - **Translate Shell** (`trans`) — replaces DeepL (no API key)
+- **System-wide wrappers/symlinks** so tools are on `PATH` for all users
+- **OSINT Updater** desktop launcher (runs via `pkexec`)
+- **Trace Labs CTF Guide** PDF dropped on the Desktop
+- **Validator** to sanity-check versions, PATH, and repo keys
 
 ---
 
@@ -33,13 +29,7 @@ Runs as a regular user or with `sudo`, is idempotent, and ships with a built-in 
 
 ```bash
 cd ~/Desktop
-# choose one:
-wget https://raw.githubusercontent.com/<your-username>/<your-repo>/main/osint-tools.sh
-# or
-curl -O https://raw.githubusercontent.com/<your-username>/<your-repo>/main/osint-tools.sh
-
+# Download (save as osint-tools.sh), make executable, and run as a regular user:
+wget -O osint-tools.sh "https://github.com/404Yeti/ultimate-osint-tools/blob/main/osint-tool.sh?raw=1"
 chmod +x osint-tools.sh
-# Run as your normal user (recommended). The script will sudo when needed:
 ./osint-tools.sh
-# or explicitly:
-sudo ./osint-tools.sh
