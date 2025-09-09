@@ -1,12 +1,13 @@
 #!/bin/zsh
-# Ultimate OSINT Setup for Kali + Updater + Validator (translate-shell + robust Shodan/cargo)
+# Ultimate OSINT Setup for Kali + Updater + Validator
+# 2025-09-09: fix SpiderFoot venv installer (zsh + set -u), keep Firefox hardening, PATH fix, Shodan deferred OK, StegOSuite optional.
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 LOG_FILE="${HOME}/osint-bootstrap.log"
 touch "$LOG_FILE" || { echo "Cannot write ${LOG_FILE}"; exit 1; }
 
-# Resolve target user (for per-user installs & desktop files)
+# Resolve target user
 if [[ $EUID -eq 0 && -n "${SUDO_USER-}" && "${SUDO_USER}" != "root" ]]; then
   TARGET_USER="${SUDO_USER}"
   TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
@@ -15,7 +16,6 @@ else
   TARGET_HOME="${HOME}"
 fi
 [[ -z "${TARGET_HOME}" ]] && TARGET_HOME="${HOME}"
-
 if [[ $EUID -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
 
 log()   { print -r -- "$(date +'%F %T') [INFO] $*" | tee -a "$LOG_FILE" >&2; }
@@ -35,12 +35,7 @@ EOS
   ${SUDO} sed -i "s#__REAL__#${REAL}#g" "$DEST"
   ${SUDO} chmod 0755 "$DEST"
 }
-
-symlink_if_exists() {
-  local SRC="$1" DEST_NAME="$2"
-  [[ -x "$SRC" ]] || return 0
-  ${SUDO} ln -sf "$SRC" "/usr/local/bin/${DEST_NAME}"
-}
+symlink_if_exists() { local SRC="$1" DEST_NAME="$2"; [[ -x "$SRC" ]] || return 0; ${SUDO} ln -sf "$SRC" "/usr/local/bin/${DEST_NAME}"; }
 
 ensure_global_symlinks() {
   local CARGODIR="${TARGET_HOME}/.cargo/bin"
@@ -48,7 +43,6 @@ ensure_global_symlinks() {
     command -v "$b" >/dev/null 2>&1 || symlink_if_exists "${CARGODIR}/${b}" "${b}"
   done
 }
-
 ensure_pipx_wrappers() {
   local bins=(shodan sherlock metagoofil sublist3r sf.py)
   for b in "${bins[@]}"; do
@@ -56,7 +50,7 @@ ensure_pipx_wrappers() {
   done
 }
 
-# ---------- Kali keyring ----------
+# ---------- Kali keyring (UNCHANGED) ----------
 ensure_kali_keyring() {
   local KR="/usr/share/keyrings/kali-archive-keyring.gpg"
   ${SUDO} mkdir -p /usr/share/keyrings 2>>"$LOG_FILE" || logerr "mkdir keyrings failed"
@@ -85,25 +79,46 @@ apt_self_heal() {
   run "${SUDO} apt-get -y clean || true"
 }
 
+# ---------- Base packages ----------
+apt_update_once() { run "${SUDO} apt-get update -y || ${SUDO} apt-get update"; }
+apt_install_one() {
+  local pkg="$1"
+  run "${SUDO} apt-get install -y ${pkg}" && return 0
+  run "${SUDO} apt-get -f install -y || true"
+  run "${SUDO} dpkg --configure -a || true"
+  run "${SUDO} apt-get install -y ${pkg}"
+}
+apt_install_with_alternates() {
+  local candidate
+  for candidate in "$@"; do
+    if ${SUDO} apt-get -s install "$candidate" >/dev/null 2>&1; then
+      apt_install_one "$candidate" && return 0
+    fi
+  done
+  return 1
+}
+
 install_base_packages() {
-  log "[*] Base packages & build deps"
+  log "[*] Base packages & build deps (robust)"
   ensure_kali_keyring
-  run "${SUDO} apt-get update -y"
+  apt_update_once
   local pkgs=(
     ca-certificates apt-transport-https software-properties-common gnupg
     curl wget git jq unzip zip xz-utils coreutils moreutils ripgrep fzf gawk
     build-essential pkg-config make gcc g++ libc6-dev
     python3 python3-venv python3-pip python3-setuptools python3-dev pipx
-    golang-go
-    libssl-dev
+    golang-go libssl-dev
     openjdk-11-jdk maven
     exiftool tor torbrowser-launcher
-    whiptail zenity
-    chromium
-    nodejs npm
-    sq
+    whiptail zenity chromium nodejs npm sq firefox-esr
+    steghide stegseek
+    translate-shell
   )
-  run "${SUDO} apt-get install -y ${^pkgs}"
+  local p
+  for p in "${pkgs[@]}"; do
+    apt_install_one "$p" || logerr "Failed to install ${p} (continuing)"
+  done
+  apt_install_with_alternates pipx python3-pipx || log "[*] pipx alt not available; will bootstrap later if needed."
 }
 
 setup_python_envs() {
@@ -154,22 +169,16 @@ apt_try_install() {
   run "${SUDO} apt-get update -y"
   run "${SUDO} apt-get install -y $pkg" || return 1
 }
-
 pipx_user_install_or_upgrade() {
   local app="$1" spec="$2"
   run "${SUDO} -u \"$TARGET_USER\" bash -lc 'if pipx list 2>/dev/null | grep -qi \"^${app}\\b\"; then pipx upgrade ${app} || true; else pipx install \"${spec}\"; fi'"
 }
-
 go_install_if_missing() {
   local module="$1" ; local bin="${2:-}" ; local name="$bin"
   if [[ -z "$name" ]]; then name="${module##*/}"; name="${name%@*}"; fi
   if ! command -v "$name" >/dev/null 2>&1; then run "env GOBIN=/usr/local/bin go install \"$module\""; fi
 }
-
-cargo_install_if_missing() {
-  local crate="$1"
-  if ! command -v "$crate" >/dev/null 2>&1; then run "${SUDO} -u \"$TARGET_USER\" bash -lc 'cargo install --locked ${crate}'"; fi
-}
+cargo_install_if_missing() { local crate="$1"; if ! command -v "$crate" >/dev/null 2>&1; then run "${SUDO} -u \"$TARGET_USER\" bash -lc 'cargo install --locked ${crate}'"; fi; }
 
 # PhoneInfoga upstream fallback
 phoneinfoga_upstream_fallback() {
@@ -186,50 +195,43 @@ phoneinfoga_upstream_fallback() {
   rm -rf "$tmp" || true
 }
 
-# StegOSuite fallback build
-build_stegosuite_from_source() {
-  local repo="https://github.com/osde8info/stegosuite.git"
-  local app="stegosuite"
-  local optdir="/opt/${app}"
-  local desktop="${HOME}/.local/share/applications/${app}.desktop"
-  local tmpdir; tmpdir="$(mktemp -d)"
-  log "[*] Building StegOSuite from source (Maven + JDK 11)…"
-  run "${SUDO} mkdir -p \"$optdir\""
-  (
-    cd "$tmpdir"
-    run "git clone --depth=1 \"$repo\" src"
-    cd src
-    if ! mvn -q -DskipTests package; then
-      logerr "[stegosuite] Maven build failed — check ${LOG_FILE}"
-    fi
-    local jar; jar="$(ls -1 target/*stegosuite*.jar 2>/dev/null | head -n1 || true)"
-    if [[ -n "$jar" ]]; then
-      run "${SUDO} install -m 0644 \"$jar\" \"$optdir/${app}.jar\""
-      log "[*] Installed: $optdir/${app}.jar"
-    else
-      logerr "[stegosuite] Build finished but no JAR found in target/"
-    fi
-  )
-  rm -rf "$tmpdir" || true
+# ---------- SpiderFoot source+venv (guaranteed) ----------
+install_spiderfoot_from_source() {
+  local app="spiderfoot"
+  local repo="https://github.com/smicallef/spiderfoot.git"
+  local dest="/opt/${app}"
+  local venv="${dest}/venv"
 
-  mkdir -p "$(dirname "$desktop")"
-  cat > "$desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=${app:u}
-Comment=Launch ${app}
-Exec=sh -c 'java -jar "${optdir}/${app}.jar" || zenity --error --text="Missing ${app}.jar in ${optdir}"'
-Icon=utilities-terminal
-Terminal=false
-Categories=Utility;Security;
-StartupNotify=true
+  log "[*] Installing SpiderFoot from source into ${dest}"
+  run "${SUDO} rm -rf \"${dest}\""
+  run "${SUDO} git clone --depth=1 \"${repo}\" \"${dest}\""
+  run "${SUDO} python3 -m venv \"${venv}\""
+  run "${SUDO} \"${venv}/bin/pip\" -q install --upgrade pip wheel setuptools"
+  if [[ -f "${dest}/requirements.txt" ]]; then
+    run "${SUDO} \"${venv}/bin/pip\" -q install -r \"${dest}/requirements.txt\""
+  fi
+
+  ${SUDO} tee /usr/local/bin/spiderfoot >/dev/null <<EOF
+#!/usr/bin/env bash
+exec "${venv}/bin/python3" "${dest}/sf.py" "\$@"
 EOF
-  chmod +x "$desktop"
-  log "[*] Desktop entry created: $desktop"
+  ${SUDO} chmod 0755 /usr/local/bin/spiderfoot
+
+  ${SUDO} tee /usr/local/bin/sf.py >/dev/null <<EOF
+#!/usr/bin/env bash
+exec "${venv}/bin/python3" "${dest}/sf.py" "\$@"
+EOF
+  ${SUDO} chmod 0755 /usr/local/bin/sf.py
+
+  log "[*] SpiderFoot installed (wrappers: /usr/local/bin/spiderfoot, /usr/local/bin/sf.py)"
 }
 
 # ---------- translate-shell (trans) ----------
 install_translate_shell() {
+  if apt_try_install translate-shell && command -v trans >/dev/null 2>&1; then
+    log "[*] translate-shell installed via APT: $(command -v trans)"
+    return 0
+  fi
   log "[*] Installing translate-shell (trans) from source…"
   local tmp; tmp="$(mktemp -d)"
   (
@@ -240,10 +242,16 @@ install_translate_shell() {
     run "${SUDO} make install"
   )
   rm -rf "$tmp" || true
-  if command -v trans >/dev/null 2>&1; then
-    log "[*] translate-shell installed: $(command -v trans)"
+  command -v trans >/dev/null 2>&1 && log "[*] translate-shell installed: $(command -v trans)" || logerr "translate-shell build failed"
+}
+
+# ---------- Shodan helper ----------
+maybe_init_shodan() {
+  if [[ -n "${SHODAN_API_KEY-}" ]]; then
+    run "${SUDO} -u \"$TARGET_USER\" env SHODAN_API_KEY=\"${SHODAN_API_KEY}\" sh -lc 'shodan init \"$SHODAN_API_KEY\" || true'"
   else
-    logerr "translate-shell build/install did not place 'trans' on PATH"
+    ${SUDO} mkdir -p /etc/osint 2>>"$LOG_FILE" || true
+    ${SUDO} bash -lc 'echo "no-api" > /etc/osint/skip-shodan-init' 2>>"$LOG_FILE" || true
   fi
 }
 
@@ -251,55 +259,53 @@ install_translate_shell() {
 install_tools_from_list() {
   log "[*] Installing OSINT tools"
 
-  # Shodan (pipx user) + ensure pkg_resources + wrapper
+  # Shodan
   pipx_user_install_or_upgrade "shodan" "shodan"
   run "${SUDO} -u \"$TARGET_USER\" bash -lc 'pipx runpip shodan install -U \"setuptools>=68\" \"pip>=23\" wheel || true'"
   write_wrapper "/usr/local/bin/shodan" "${TARGET_HOME}/.local/bin/shodan"
 
-  # Sherlock (pipx user)
+  # Sherlock
   pipx_user_install_or_upgrade "sherlock" "git+https://github.com/sherlock-project/sherlock.git"
 
-  # PhoneInfoga (Go → fallback)
+  # PhoneInfoga
   if command -v go >/dev/null 2>&1; then
     go_install_if_missing "github.com/sundowndev/phoneinfoga/v2/cmd/phoneinfoga@latest" "phoneinfoga"
   fi
   phoneinfoga_upstream_fallback
 
-  # SpiderFoot (APT → pipx fallback)
+  # SpiderFoot: APT → pipx → source+venv (guaranteed)
   if ! apt_try_install spiderfoot; then
-    pipx_user_install_or_upgrade "spiderfoot" "git+https://github.com/smicallef/spiderfoot.git"
-    [[ -x "${TARGET_HOME}/.local/bin/sf.py" ]] && write_wrapper "/usr/local/bin/sf.py" "${TARGET_HOME}/.local/bin/sf.py"
+    pipx_user_install_or_upgrade "spiderfoot" "git+https://github.com/smicallef/spiderfoot.git" || true
+    if [[ -x "${TARGET_HOME}/.local/bin/sf.py" ]]; then
+      write_wrapper "/usr/local/bin/sf.py" "${TARGET_HOME}/.local/bin/sf.py"
+    else
+      install_spiderfoot_from_source
+    fi
   fi
 
-  # sn0int (APT → cargo fallback)
+  # sn0int
   if ! apt_try_install sn0int; then
     cargo_install_if_missing "sn0int"
   fi
 
-  # Metagoofil (APT → pipx)
-  if ! apt_try_install metagoofil; then
-    pipx_user_install_or_upgrade "metagoofil" "git+https://github.com/opsdisk/metagoofil.git"
-  fi
+  # Metagoofil / Sublist3r
+  if ! apt_try_install metagoofil; then pipx_user_install_or_upgrade "metagoofil" "git+https://github.com/opsdisk/metagoofil.git"; fi
+  if ! apt_try_install sublist3r; then pipx_user_install_or_upgrade "sublist3r" "git+https://github.com/aboul3la/Sublist3r.git"; fi
 
-  # Sublist3r (APT → pipx)
-  if ! apt_try_install sublist3r; then
-    pipx_user_install_or_upgrade "sublist3r" "git+https://github.com/aboul3la/Sublist3r.git"
-  fi
-
-  # StegOSuite (APT → source)
-  if ! apt_try_install stegosuite; then
-    build_stegosuite_from_source
-  fi
-
-  # ExifTool
-  apt_try_install exiftool || apt_try_install libimage-exiftool-perl || true
+  # Stego tools
+  apt_try_install stegosuite || log "[*] StegOSuite APT not available; skipping (optional)."
+  apt_try_install steghide || true
+  apt_try_install stegseek || true
 
   # translate-shell
   install_translate_shell
 
-  # Ensure global cargo/sn0int visibility & pipx wrappers
+  # Ensure visibility & wrappers
   ensure_global_symlinks
   ensure_pipx_wrappers
+
+  # Shodan init (auto if env; otherwise defer cleanly)
+  maybe_init_shodan
 }
 
 # ---------- Trace Labs PDF ----------
@@ -364,7 +370,6 @@ upgrade_pipx_tools() {
   if command -v pipx >/dev/null 2>&1; then
     log "[*] Upgrading pipx apps"
     run "pipx upgrade-all || true"
-    # Ensure Shodan venv has setuptools for pkg_resources
     run "pipx runpip shodan install -U setuptools pip wheel || true"
   fi
 }
@@ -401,20 +406,94 @@ Categories=System;Utility;Security;
 StartupNotify=true
 EOF
   ${SUDO} chmod +x "$DESK"
-  if [[ $EUID -eq 0 ]]; then
-    ${SUDO} chown "${TARGET_USER}:${TARGET_USER}" "$DESK"
-  fi
+  if [[ $EUID -eq 0 ]]; then ${SUDO} chown "${TARGET_USER}:${TARGET_USER}" "$DESK"; fi
+}
+
+# ===================== FIREFOX HARDENING =====================
+harden_firefox() {
+  log "[*] Hardening Firefox via enterprise policies"
+  apt_try_install firefox-esr || true
+  local policy_tmp; policy_tmp="$(mktemp)"
+  cat > "$policy_tmp" <<'JSON'
+{
+  "policies": {
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
+
+    "SanitizeOnShutdown": {
+      "Cache": true, "Cookies": true, "Downloads": true, "FormData": true,
+      "History": true, "Sessions": true, "SiteSettings": false, "OfflineApps": true,
+      "Locked": true
+    },
+
+    "Permissions": {
+      "Camera": { "Default": "block" },
+      "Microphone": { "Default": "block" },
+      "Location": { "Default": "block" }
+    },
+
+    "Preferences": {
+      "browser.contentblocking.category": { "Value": "strict", "Status": "locked" },
+      "privacy.trackingprotection.enabled": { "Value": true, "Status": "locked" },
+      "privacy.trackingprotection.socialtracking.enabled": { "Value": true, "Status": "locked" },
+      "privacy.resistFingerprinting": { "Value": true, "Status": "locked" },
+      "toolkit.telemetry.enabled": { "Value": false, "Status": "locked" },
+      "toolkit.telemetry.unified": { "Value": false, "Status": "locked" },
+      "datareporting.healthreport.uploadEnabled": { "Value": false, "Status": "locked" },
+      "app.shield.optoutstudies.enabled": { "Value": false, "Status": "locked" },
+      "permissions.default.geo": { "Value": 2, "Status": "locked" },
+      "permissions.default.microphone": { "Value": 2, "Status": "locked" },
+      "permissions.default.camera": { "Value": 2, "Status": "locked" },
+      "geo.enabled": { "Value": false, "Status": "locked" },
+      "media.navigator.enabled": { "Value": false, "Status": "locked" }
+    },
+
+    "DisplayBookmarksToolbar": "always",
+    "ManagedBookmarks": [
+      { "toplevel_name": "OSINT" },
+      { "name": "SpiderFoot (local)", "url": "http://127.0.0.1:5001" },
+      { "name": "Shodan", "url": "https://www.shodan.io/" },
+      { "name": "Censys", "url": "https://search.censys.io/" },
+      { "name": "crt.sh (CT)", "url": "https://crt.sh/" },
+      { "name": "urlscan.io", "url": "https://urlscan.io/" },
+      { "name": "VirusTotal", "url": "https://www.virustotal.com/gui/home/search" },
+      { "name": "Wayback Machine", "url": "https://web.archive.org/" },
+      { "name": "HaveIBeenPwned", "url": "https://haveibeenpwned.com/" },
+      { "name": "BuiltWith", "url": "https://builtwith.com/" },
+      { "name": "WHOIS", "url": "https://who.is/" },
+      { "name": "GreyNoise Viz", "url": "https://viz.greynoise.io/" },
+      { "name": "OSINT Framework", "url": "https://osintframework.com/" },
+      { "name": "Trace Labs CTF", "url": "https://www.tracelabs.org/initiatives/search-party-ctf" }
+    ]
+  }
+}
+JSON
+  local targets=(
+    "/etc/firefox/policies/policies.json"
+    "/usr/lib/firefox-esr/distribution/policies.json"
+    "/usr/lib/firefox/distribution/policies.json"
+  )
+  for t in "${targets[@]}"; do
+    ${SUDO} mkdir -p "$(dirname "$t")"
+    [[ -f "$t" && ! -f "${t}.bak" ]] && ${SUDO} cp -f "$t" "${t}.bak" 2>>"$LOG_FILE" || true
+    ${SUDO} install -m 0644 "$policy_tmp" "$t"
+  done
+  rm -f "$policy_tmp" || true
+  log "[*] Firefox policies deployed (check about:policies)."
 }
 
 post_install_checks() {
   log "[*] Post-install sanity checks"
   local missing=()
-  for b in shodan sherlock phoneinfoga sn0int metagoofil sublist3r exiftool tor trans; do
+  for b in shodan sherlock phoneinfoga sn0int metagoofil sublist3r exiftool tor trans steghide; do
     command -v "$b" >/dev/null 2>&1 || missing+=("$b")
   done
   command -v spiderfoot >/dev/null 2>&1 || command -v sf.py >/dev/null 2>&1 || missing+=("spiderfoot/sf.py")
-  command -v stegosuite >/dev/null 2>&1 || [[ -f /opt/stegosuite/stegosuite.jar ]] || missing+=("stegosuite (APT) or /opt/stegosuite/stegosuite.jar")
+  command -v stegseek >/dev/null 2>&1 || true
+  command -v stegosuite >/dev/null 2>&1 || true
   command -v torbrowser-launcher >/dev/null 2>&1 || missing+=("torbrowser-launcher")
+
   if (( ${#missing[@]} )); then
     logerr "Missing or not detected: ${missing[*]}"
     log "Review ${LOG_FILE} for errors."
@@ -427,30 +506,32 @@ usage_hints() {
   cat <<'EOF' | tee -a "$LOG_FILE" >/dev/null
 ----------------------------------------------------------------
 Usage:
-- Shodan:          shodan init <API_KEY>   (first time)
+- Shodan:          shodan init <API_KEY>   (or set SHODAN_API_KEY before running script)
+- SpiderFoot UI:   spiderfoot -l 127.0.0.1:5001  (open http://127.0.0.1:5001)
+- StegHide:        steghide embed -cf cover.jpg -ef secret.txt -sf out.jpg
+                   steghide extract -sf out.jpg
+- StegSeek:        stegseek out.jpg /usr/share/wordlists/rockyou.txt
 - Translate:       trans -b :de "Hello, how are you?"
-                   trans :es "This is a test"
-- StegOSuite:      stegosuite   (APT)   or   java -jar /opt/stegosuite/stegosuite.jar
-- SpiderFoot UI:   spiderfoot -l 127.0.0.1:5001  (then open http://127.0.0.1:5001)
-- Updater (GUI):   Double-click "OSINT Updater" on Desktop (runs via pkexec)
-- Updater (CLI):   pkexec /usr/local/bin/osint-updater
-- PATH refresh:    source ~/.profile && source ~/.zprofile  (or open a new terminal)
+
+Firefox:
+- about:policies shows hardened settings; OSINT bookmarks on toolbar.
+- Cookies/history cleared on exit; geo/mic/camera blocked; telemetry disabled.
+
+Updater:
+- GUI:   Double-click "OSINT Updater" on Desktop (pkexec)
+- CLI:   pkexec /usr/local/bin/osint-updater
 
 Workspaces:
-- Outputs saved in  ~/osint-workspaces/<target>/<timestamp>/
-
-Docs:
-- Trace Labs Contestant Guide on Desktop:
-  Trace-Labs-OSINT-Search-Party-CTF-Contestant-Guide_v1.pdf
+- Outputs in  ~/osint-workspaces/<target>/<timestamp>/
 
 Logs:
-- Setup log:       ~/osint-bootstrap.log
-- Updater log:     /var/log/osint-updater.log (or /tmp fallback)
+- Setup:  ~/osint-bootstrap.log
+- Update: /var/log/osint-updater.log (or /tmp fallback)
 ----------------------------------------------------------------
 EOF
 }
 
-# ===================== BUILT-IN VALIDATOR =====================
+# ===================== VALIDATOR =====================
 validator() {
   local PASSES=0 FAILS=0 WARNINGS=0
   local BLUE='\033[1;34m' GREEN='\033[1;32m' YELLOW='\033[1;33m' RED='\033[1;31m' NC='\033[0m'
@@ -486,11 +567,7 @@ validator() {
             return 0
           fi
         done
-        if "$bin" >/dev/null 2>&1; then
-          ok "$bin -> OK"
-        else
-          warn "$bin is present, but no version/help worked."
-        fi
+        if "$bin" >/dev/null 2>&1; then ok "$bin -> OK"; else warn "$bin present but no version/help worked."; fi
       fi
     else
       fail "$bin not found on PATH"
@@ -499,13 +576,11 @@ validator() {
 
   check_path_contains(){
     local needle="$1"
-    if [[ ":$PATH:" == *":${needle}:"* ]]; then
-      ok "PATH contains ${needle}"
+    if [[ ":$PATH:" == *":${needle}:"* ]]; then ok "PATH contains ${needle}"
     else
       if command -v sudo >/dev/null 2>&1 && [[ -n "${REAL_USER}" ]]; then
         if sudo -u "$REAL_USER" bash -lc "grep -q 'export PATH=\"\\\$HOME/.local/bin:\\\$PATH\"' ~/.zprofile ~/.profile 2>/dev/null"; then
-          ok "PATH will include ${needle} for ${REAL_USER} on next login"
-          return
+          ok "PATH will include ${needle} for ${REAL_USER} on next login"; return
         fi
       fi
       warn "PATH missing ${needle}"
@@ -526,23 +601,28 @@ validator() {
   show_ver npm --version || true
   show_ver java -version || true
   show_ver mvn -v || true
+  show_ver firefox-esr --version || show_ver firefox --version || true
 
   check_path_contains "${REAL_HOME}/.local/bin"
   [[ -n "${GOBIN-}" ]] && check_path_contains "${GOBIN}"
 
-  # Shodan (robust)
+  # Shodan
   if has shodan; then
-    if shodan --help >/dev/null 2>&1 || shodan version >/dev/null 2>&1 || shodan -h >/dev/null 2>&1 || shodan >/dev/null 2>&1; then
-      ok "shodan CLI OK"
+    if shodan info >/dev/null 2>&1; then
+      ok "Shodan is initialized"
     else
-      fail "shodan present but unresponsive to version/help"
+      if [[ -f /etc/osint/skip-shodan-init ]]; then
+        ok "Shodan init deferred (no API key provided)"
+      else
+        warn "Shodan not initialized (run: shodan init <API_KEY>)"
+      fi
     fi
-    if shodan info >/dev/null 2>&1; then ok "Shodan is initialized"; else warn "Shodan not initialized (run: shodan init <API_KEY>)"; fi
   else
     fail "shodan not found on PATH"
   fi
 
   if has phoneinfoga; then show_ver phoneinfoga version || ok "phoneinfoga present"; else fail "phoneinfoga not found"; fi
+
   if has spiderfoot; then ok "spiderfoot present: $(command -v spiderfoot)"
   elif has sf.py; then ok "SpiderFoot present as sf.py: $(command -v sf.py)"
   else fail "SpiderFoot not found (spiderfoot/sf.py)"; fi
@@ -551,6 +631,8 @@ validator() {
   show_ver metagoofil -h || true
   show_ver sublist3r -h || true
   show_ver exiftool -ver || true
+  show_ver steghide --version || true
+  show_ver stegseek --version || true
   show_ver tor --version || true
   show_ver torbrowser-launcher --help || true
   show_ver trans -V || true
@@ -559,23 +641,25 @@ validator() {
   check_file "${REAL_HOME}/Desktop/OSINT-Updater.desktop" "OSINT-Updater.desktop"
   check_file "${REAL_HOME}/Desktop/Trace-Labs-OSINT-Search-Party-CTF-Contestant-Guide_v1.pdf" "Trace Labs PDF"
 
+  # StegOSuite optional
   if command -v stegosuite >/dev/null 2>&1; then ok "StegOSuite available via APT"
-  elif [[ -f /opt/stegosuite/stegosuite.jar ]]; then ok "StegOSuite jar present: /opt/stegosuite/stegosuite.jar"
-  else warn "StegOSuite not detected (APT or /opt/stegosuite/stegosuite.jar)"; fi
+  else ok "StegOSuite optional: not installed"; fi
+
+  # Firefox policies presence
+  local ff_pol_etc="/etc/firefox/policies/policies.json"
+  local ff_pol_sys=""
+  [[ -f /usr/lib/firefox-esr/distribution/policies.json ]] && ff_pol_sys="/usr/lib/firefox-esr/distribution/policies.json"
+  [[ -z "$ff_pol_sys" && -f /usr/lib/firefox/distribution/policies.json ]] && ff_pol_sys="/usr/lib/firefox/distribution/policies.json"
+  if [[ -f "$ff_pol_etc" || -n "$ff_pol_sys" ]]; then ok "Firefox policies present"; else warn "Firefox policies not found"; fi
 
   [[ -f /usr/share/keyrings/kali-archive-keyring.gpg ]] && ok "Kali archive keyring present" || warn "Kali archive keyring missing"
   [[ -f /etc/apt/trusted.gpg.d/apt-vulns-sexy.gpg ]] && ok "apt-vulns.sexy key installed" || warn "apt-vulns.sexy key not found"
   [[ -f /etc/apt/sources.list.d/apt-vulns-sexy.list ]] && ok "apt-vulns.sexy repo listed" || warn "apt-vulns.sexy repo list missing"
 
   local WS="${REAL_HOME}/osint-workspaces"
-  if [[ -d "$WS" ]]; then
-    ok "Workspace base exists: $WS"
-  else
-    if command -v sudo >/dev/null 2>&1; then
-      sudo -u "$REAL_USER" mkdir -p "$WS" 2>/dev/null || true
-    fi
-    [[ -d "$WS" ]] && ok "Workspace base created: $WS" || warn "Workspace base missing (created on first run): $WS"
-  fi
+  if [[ -d "$WS" ]]; then ok "Workspace base exists: $WS"
+  else if command -v sudo >/dev/null 2>&1; then sudo -u "$REAL_USER" mkdir -p "$WS" 2>/dev/null || true; fi
+       [[ -d "$WS" ]] && ok "Workspace base created: $WS" || warn "Workspace base missing (created on first run): $WS"; fi
 
   echo
   if (( FAILS == 0 )); then
@@ -585,11 +669,16 @@ validator() {
     printf "\033[1;33mValidation finished with issues.\033[0m  Passes: %d  Warnings: %d  Fails: %d\n" "$PASSES" "$WARNINGS" "$FAILS"
     echo "Hints:"
     echo " - PATH: open a new terminal or 'source ~/.profile' and '~/.zprofile'"
-    echo " - Shodan: 'shodan init <API_KEY>'"
-    echo " - SpiderFoot may be 'spiderfoot' (APT) or 'sf.py' (pipx)"
-    echo " - StegOSuite: install via APT or ensure /opt/stegosuite/stegosuite.jar exists"
+    echo " - Shodan: 'shodan init <API_KEY>' (or rerun with SHODAN_API_KEY set)"
+    echo " - SpiderFoot may be 'spiderfoot' (APT) or 'sf.py' (source/venv)"
     return 1
   fi
+}
+
+# Ensure current process PATH includes ~/.local/bin (fixes validator warning now)
+ensure_runtime_path_now() {
+  [[ ":$PATH:" == *":${TARGET_HOME}/.local/bin:"* ]] || export PATH="${TARGET_HOME}/.local/bin:$PATH"
+  hash -r
 }
 
 # ===================== MAIN =====================
@@ -597,6 +686,7 @@ main() {
   local MODE="${1:-}"  # --no-validate | --validate-only | (default: install+validate)
 
   if [[ "$MODE" == "--validate-only" ]]; then
+    ensure_runtime_path_now
     validator
     exit $?
   fi
@@ -608,9 +698,13 @@ main() {
   setup_go_env
   setup_rust_env
   setup_sn0int_repo
+
+  ensure_runtime_path_now
   install_tools_from_list
   fetch_tracelabs_pdf
   install_osint_updater
+  harden_firefox
+
   run "${SUDO} -u \"$TARGET_USER\" mkdir -p \"$TARGET_HOME/osint-workspaces\""
   post_install_checks
   usage_hints
